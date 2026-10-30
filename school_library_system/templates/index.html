@@ -3568,10 +3568,47 @@
     }
 
     // Save DB to localStorage
+    
+    // ==========================================
+    // MULTI-TEACHER CLOUD / SERVER SYNC ENGINE
+    // ==========================================
+    async function pushToServerSync() {
+      try {
+        await fetch('/api/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(appDb)
+        });
+      } catch(e) {
+        // Offline / client-only mode
+      }
+    }
+
+    async function pullFromServerSync(showFeedback = false) {
+      try {
+        const res = await fetch('/api/sync');
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.students && data.students.length > 0) {
+            appDb = data;
+            try { localStorage.setItem(STORAGE_KEY, JSON.stringify(appDb)); } catch(e) {}
+            refreshOverdueStatuses();
+            renderAll();
+            if (showFeedback) {
+              showToast(currentLang === 'ar' ? 'تم تحديث ومزامنة البيانات مع السيرفر بنجاح!' : 'Synchronized live with server successfully!', 'success');
+            }
+          }
+        }
+      } catch(e) {
+        // Running as standalone file without server backend
+      }
+    }
+
     function saveDatabase() {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(appDb));
         showToast(currentLang === 'ar' ? 'تم حفظ التغييرات بنجاح في قاعدة البيانات' : 'Changes saved successfully to database', 'success');
+      pushToServerSync();
       } catch (err) {
         showToast(currentLang === 'ar' ? 'تعذر الحفظ في المتصفح، يرجى تفقد المساحة' : 'Failed to save to local browser storage', 'error');
       }
@@ -6321,6 +6358,8 @@ Thank you for your valued cooperation and support.`;
       document.getElementById('currentDateDisplay').textContent = TODAY_STR;
       loadDatabase();
       renderAll();
+      pullFromServerSync();
+      setInterval(pullFromServerSync, 20000); // Auto-sync every 20s across all teachers
     });
   </script>
 </body>

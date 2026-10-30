@@ -178,11 +178,69 @@ def download_db():
 def open_browser():
     webbrowser.open_new('http://127.0.0.1:5000/')
 
+
+@app.route('/api/sync', methods=['GET', 'POST'])
+def sync_library_data():
+    database.refresh_overdue_status()
+    conn = database.get_db()
+    c = conn.cursor()
+    
+    if request.method == 'GET':
+        c.execute("SELECT id, name, grade, section, phone FROM students ORDER BY name ASC")
+        students = [dict(row) for row in c.fetchall()]
+        
+        c.execute("SELECT id, title, category, author, code, copies FROM books ORDER BY title ASC")
+        books = [dict(row) for row in c.fetchall()]
+        
+        query = """
+            SELECT b.id, b.borrow_date as borrowDate, b.due_date as dueDate, b.return_date as returnDate,
+                   b.status, b.notes,
+                   s.id as studentId, s.name as studentName, s.grade as studentGrade, s.phone as studentPhone,
+                   bk.id as bookId, bk.title as bookTitle
+            FROM borrowings b
+            JOIN students s ON b.student_id = s.id
+            JOIN books bk ON b.book_id = bk.id
+            ORDER BY b.created_at DESC
+        """
+        c.execute(query)
+        borrowings = [dict(row) for row in c.fetchall()]
+        conn.close()
+        return jsonify({
+            'students': students,
+            'books': books,
+            'borrowings': borrowings
+        })
+        
+    elif request.method == 'POST':
+        data = request.json or {}
+        if 'students' in data and len(data['students']) > 0:
+            for s in data['students']:
+                c.execute("INSERT OR REPLACE INTO students (id, name, grade, section, phone) VALUES (?, ?, ?, ?, ?)",
+                          (s['id'], s['name'], s['grade'], s.get('section', ''), s.get('phone', '')))
+                          
+        if 'books' in data and len(data['books']) > 0:
+            for b in data['books']:
+                c.execute("INSERT OR REPLACE INTO books (id, title, category, author, code, copies) VALUES (?, ?, ?, ?, ?, ?)",
+                          (b['id'], b['title'], b.get('category', 'General'), b.get('author', ''), b.get('code', 'ST-01'), b.get('copies', 1)))
+                          
+        if 'borrowings' in data:
+            for br in data['borrowings']:
+                c.execute("""
+                    INSERT OR REPLACE INTO borrowings (id, student_id, book_id, borrow_date, due_date, return_date, status, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (br['id'], br['studentId'], br['bookId'], br['borrowDate'], br['dueDate'], br.get('returnDate'), br['status'], br.get('notes', '')))
+                
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'success'})
+
 if __name__ == '__main__':
-    print("==================================================")
-    print("📚 تم تشغيل خادم مكتبة المدرسة بنجاح!")
-    print("🌐 يرجى فتح الرابط التالي في المتصفح:")
-    print("    http://127.0.0.1:5000")
-    print("==================================================")
-    Timer(1.5, open_browser).start()
-    app.run(host='127.0.0.1', port=5000, debug=False)
+    port = int(os.environ.get('PORT', 5000))
+    is_render = os.environ.get('RENDER') is not None
+    if not is_render:
+        print("==================================================")
+        print("📚 تم تشغيل خادم مكتبة المدرسة بنجاح!")
+        print(f"🌐 يرجى فتح الرابط التالي في المتصفح: http://127.0.0.1:{port}")
+        print("==================================================")
+        Timer(1.5, open_browser).start()
+    app.run(host='0.0.0.0', port=port, debug=False)
