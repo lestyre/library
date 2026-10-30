@@ -1,0 +1,188 @@
+from flask import Flask, render_template, request, jsonify, send_file
+import sqlite3
+import os
+import webbrowser
+from threading import Timer
+from datetime import datetime, date
+import database
+
+app = Flask(__name__)
+database.init_db()
+
+@app.route('/')
+def index():
+    database.refresh_overdue_status()
+    return render_template('index.html')
+
+@app.route('/api/stats', methods=['GET'])
+def get_stats():
+    database.refresh_overdue_status()
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM students")
+    total_students = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM books")
+    total_books = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM borrowings WHERE return_date IS NULL")
+    active_borrowings = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM borrowings WHERE status = 'overdue' AND return_date IS NULL")
+    overdue_borrowings = c.fetchone()[0]
+
+    conn.close()
+    return jsonify({
+        'total_students': total_students,
+        'total_books': total_books,
+        'active_borrowings': active_borrowings,
+        'overdue_borrowings': overdue_borrowings,
+        'today': date.today().isoformat()
+    })
+
+@app.route('/api/borrowings', methods=['GET', 'POST'])
+def handle_borrowings():
+    database.refresh_overdue_status()
+    conn = database.get_db()
+    c = conn.cursor()
+
+    if request.method == 'GET':
+        status = request.args.get('status')
+        query = """
+            SELECT b.id, b.borrow_date, b.due_date, b.return_date, b.status, b.notes,
+                   s.id as student_id, s.name as student_name, s.grade as student_grade, s.phone as student_phone,
+                   bk.id as book_id, bk.title as book_title, bk.category as book_category
+            FROM borrowings b
+            JOIN students s ON b.student_id = s.id
+            JOIN books bk ON b.book_id = bk.id
+        """
+        params = []
+        if status and status != 'all':
+            query += " WHERE b.status = ?"
+            params.append(status)
+        query += " ORDER BY b.created_at DESC"
+
+        c.execute(query, params)
+        rows = [dict(row) for row in c.fetchall()]
+        conn.close()
+        return jsonify(rows)
+
+    elif request.method == 'POST':
+        data = request.json
+        borrow_id = 'BOR-' + str(int(datetime.now().timestamp()))[-5:]
+        student_id = data.get('student_id')
+        book_id = data.get('book_id')
+        borrow_date = data.get('borrow_date', date.today().isoformat())
+        due_date = data.get('due_date')
+        notes = data.get('notes', '')
+
+        status = 'overdue' if due_date < date.today().isoformat() else 'active'
+
+        c.execute("""
+            INSERT INTO borrowings (id, student_id, book_id, borrow_date, due_date, status, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (borrow_id, student_id, book_id, borrow_date, due_date, status, notes))
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True, 'id': borrow_id})
+
+@app.route('/api/borrowings/<borrow_id>/return', methods=['POST'])
+def return_borrowing(borrow_id):
+    conn = database.get_db()
+    c = conn.cursor()
+    today = date.today().isoformat()
+    data = request.json or {}
+    condition = data.get('condition', 'سليمة')
+    c.execute("""
+        UPDATE borrowings
+        SET return_date = ?, status = 'returned',
+            notes = coalesce(notes || ' | ', '') || 'أعيدت بتاريخ ' || ? || ' بحالة: ' || ?
+        WHERE id = ?
+    """, (today, today, condition, borrow_id))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/borrowings/<borrow_id>', methods=['DELETE'])
+def delete_borrowing(borrow_id):
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM borrowings WHERE id = ?", (borrow_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/students', methods=['GET', 'POST'])
+def handle_students():
+    conn = database.get_db()
+    c = conn.cursor()
+    if request.method == 'GET':
+        c.execute("SELECT * FROM students ORDER BY name ASC")
+        rows = [dict(row) for row in c.fetchall()]
+        conn.close()
+        return jsonify(rows)
+    else:
+        data = request.json
+        s_id = 'S' + str(int(datetime.now().timestamp()))[-4:]
+        c.execute("""
+            INSERT INTO students (id, name, grade, section, phone)
+            VALUES (?, ?, ?, ?, ?)
+        """, (s_id, data['name'], data['grade'], data.get('section', ''), data.get('phone', '')))
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True, 'id': s_id})
+
+@app.route('/api/students/<student_id>', methods=['DELETE'])
+def delete_student(student_id):
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM students WHERE id = ?", (student_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/books', methods=['GET', 'POST'])
+def handle_books():
+    conn = database.get_db()
+    c = conn.cursor()
+    if request.method == 'GET':
+        c.execute("SELECT * FROM books ORDER BY title ASC")
+        rows = [dict(row) for row in c.fetchall()]
+        conn.close()
+        return jsonify(rows)
+    else:
+        data = request.json
+        b_id = 'B' + str(int(datetime.now().timestamp()))[-4:]
+        c.execute("""
+            INSERT INTO books (id, title, category, author, code, copies)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (b_id, data['title'], data['category'], data.get('author', ''), data.get('code', 'ST-01'), data.get('copies', 1)))
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True, 'id': b_id})
+
+@app.route('/api/books/<book_id>', methods=['DELETE'])
+def delete_book(book_id):
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM books WHERE id = ?", (book_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/backup/db', methods=['GET'])
+def download_db():
+    db_file = os.path.join(os.path.dirname(__file__), 'library.db')
+    return send_file(db_file, as_attachment=True, download_name='school_library.db')
+
+def open_browser():
+    webbrowser.open_new('http://127.0.0.1:5000/')
+
+if __name__ == '__main__':
+    print("==================================================")
+    print("📚 تم تشغيل خادم مكتبة المدرسة بنجاح!")
+    print("🌐 يرجى فتح الرابط التالي في المتصفح:")
+    print("    http://127.0.0.1:5000")
+    print("==================================================")
+    Timer(1.5, open_browser).start()
+    app.run(host='127.0.0.1', port=5000, debug=False)
